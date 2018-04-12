@@ -182,11 +182,13 @@ class DBPediaInput(object):
   def dataset_parser(self, value):
     """Parse an Imagenet record from value."""
     keys_to_features = {
-        'X': tf.FixedLenSequenceFeature([MAX_DOCUMENT_LENGTH], tf.int64, -1),
-        'Y': tf.FixedLenFeature([], tf.int64, -1)            
+        'X': tf.FixedLenFeature(shape=[MAX_DOCUMENT_LENGTH], dtype=tf.int64),
+        'Y': tf.FixedLenFeature(shape=[1], dtype=tf.int64)            
     }
     parsed = tf.parse_single_example(value, keys_to_features)
-    return tf.squeeze(parsed['X']), parsed['Y']
+    X = parsed['X']
+    Y = parsed['Y']
+    return X, Y
 
   def __call__(self, params):
     """Input function which provides a single batch for train or eval."""
@@ -232,12 +234,14 @@ def char_rnn_model(features, labels, mode, params):
   """Character level recurrent neural network model to predict classes."""
   batch_size = params['batch_size']
   
-  byte_vectors = tf.squeeze(tf.one_hot(features, 256, 1., 0.))
+  #byte_vectors = tf.squeeze(tf.one_hot(features, 256, 1., 0.))
+  #byte_list = tf.unstack(byte_vectors, num=MAX_DOCUMENT_LENGTH, axis=1)
+  #for item in byte_list:
+  #    item.set_shape((params['batch_size'], 256))
+
   byte_vectors = tf.one_hot(features, 256, 1., 0.)
+  byte_list = tf.unstack(byte_vectors, axis=1)
   
-  byte_list = tf.unstack(byte_vectors, num=MAX_DOCUMENT_LENGTH, axis=1)
-  for item in byte_list:
-      item.set_shape((params['batch_size'], 256))
   
   cell = tf.nn.rnn_cell.GRUCell(HIDDEN_SIZE)
   _, encoding = tf.nn.static_rnn(cell, byte_list, dtype=tf.float32)
@@ -349,7 +353,11 @@ def main(unused_argv):
       params={'batches_per_epoch': batches_per_epoch})
 
   # Train.
-  current_step = 0
+  current_step = estimator._load_global_step_from_checkpoint_dir(FLAGS.model_dir)  # pylint: disable=protected-access,line-too-long
+  tf.logging.info('Training for %d steps (%.2f epochs in total). Current '
+                    'step %d' % (FLAGS.train_steps,
+                                 FLAGS.train_steps / batches_per_epoch,
+                                 current_step))
   while current_step < FLAGS.train_steps:
     # Train for up to steps_per_eval number of steps.
     # At the end of training, a checkpoint will be written to --model_dir.
