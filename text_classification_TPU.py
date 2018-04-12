@@ -18,19 +18,19 @@ from tensorflow.contrib.tpu.python.tpu import tpu_optimizer
 from tensorflow.contrib.training.python.training import evaluation
 from tensorflow.python.estimator import estimator
 
-MAX_DOCUMENT_LENGTH = 200
-HIDDEN_SIZE = 64
+_NUM_TRAIN_IMAGES = 560000
+
+MAX_DOCUMENT_LENGTH = 512
+HIDDEN_SIZE = 1024
 MAX_LABEL = 15
 CHARS_FEATURE = 'chars'  # Name of the input character feature.
+
 # Learning hyperaparmeters
 _MOMENTUM = 0.9
 _WEIGHT_DECAY = 1e-4
-
 _LR_SCHEDULE = [  # (LR multiplier, epoch to start)
-    (1.0, 5), (0.1, 10), (0.01, 20), (0.001, 30), 
+    (1.0, 5), (0.1, 15), (0.01, 25), (0.001, 30), 
 ]
-
-_NUM_TRAIN_IMAGES = 560000
 
 FLAGS = flags.FLAGS
 flags.DEFINE_bool(
@@ -111,15 +111,14 @@ flags.DEFINE_integer(
           ' after finishing the entire training regime).'))
 
 flags.DEFINE_integer(
-    'train_steps', default=100000,
-    help=('The number of steps to use for training. Default is 112603 steps'
-          ' which is approximately 90 epochs at batch size 1024. This flag'
+    'train_steps', default=54687,
+    help=('The number of steps to use for training. Default is 54687 steps'
+          ' which is approximately 100 epochs at batch size 1024. This flag'
           ' should be adjusted according to the --train_batch_size flag.'))
 
 tf.flags.DEFINE_float(
-    'learning_rate',
-    default=0.1,
-    help=('base learning assuming a batch size of 256.'
+    'learning_rate', default=0.1,
+    help=('base learning assuming a batch size of 1024.'
           'For other batch sizes it is scaled linearly with batch size.'))
 
 def learning_rate_schedule(current_epoch):
@@ -135,7 +134,7 @@ def learning_rate_schedule(current_epoch):
   Returns:
     The learning rate for the current epoch.
   """
-  scaled_lr = FLAGS.learning_rate * (FLAGS.train_batch_size / 256.0)
+  scaled_lr = FLAGS.learning_rate * (FLAGS.train_batch_size / 1024.0)
 
   decay_rate = scaled_lr * _LR_SCHEDULE[0][0] * current_epoch / _LR_SCHEDULE[0][1]  # pylint: disable=protected-access,line-too-long
   for mult, start_epoch in _LR_SCHEDULE:
@@ -169,8 +168,8 @@ def char_rnn_model(features, labels, mode, params):
   loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits) +\
           _WEIGHT_DECAY * tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables()
           if 'batch_normalization' not in v.name])
-           
   
+  #get current training epoch
   batches_per_epoch = _NUM_TRAIN_IMAGES / FLAGS.train_batch_size
   global_step = tf.train.get_global_step()
   current_epoch = (tf.cast(global_step, tf.float32)/batches_per_epoch)
@@ -194,17 +193,22 @@ def char_rnn_model(features, labels, mode, params):
           batch_size,
       ]), [batch_size, 1])
       
+  ce_repeat = tf.reshape(
+      tf.tile(tf.expand_dims(current_epoch, 0), [
+          batch_size,
+      ]), [batch_size, 1])      
   eval_metrics = None
   if mode == tf.estimator.ModeKeys.EVAL:
-    def metric_fn(labels, predicted_classes, learning_rate):
+    def metric_fn(labels, predicted_classes, lr_repeat, ce_repeat):
       """Evaluation metric fn. Performed on CPU, do not reference TPU ops."""      
       return {
           'accuracy': tf.metrics.accuracy(
-          labels=labels, predictions=predicted_classes),
-          'learning_rate': tf.metrics.mean(lr_repeat)
+                                  labels=labels, predictions=predicted_classes),
+          'learning_rate': tf.metrics.mean(lr_repeat),
+          'current_epoch': tf.metrics.mean(ce_repeat)
           }
 
-    eval_metrics = (metric_fn, [labels, predicted_classes, lr_repeat])
+    eval_metrics = (metric_fn, [labels, predicted_classes, lr_repeat, ce_repeat])
     
   return tpu_estimator.TPUEstimatorSpec(
       mode=mode, loss=loss, eval_metrics=eval_metrics)
@@ -320,3 +324,6 @@ if __name__ == '__main__':
   tf.app.run()
 
   #run CMD: python text_classification_TPU.py --use_tpu=False --model_dir=./char_results
+  #python text_classification_TPU.py --use_tpu=False --model_dir=./char_results_512 --train_batch_size=512
+  #python text_classification_TPU.py --use_tpu=False --model_dir=./char_results_1024 --train_batch_size=512
+  #export CUDA_VISIBLE_DEVICES=2
