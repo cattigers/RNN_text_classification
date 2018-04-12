@@ -146,6 +146,8 @@ def learning_rate_schedule(current_epoch):
   
 def char_rnn_model(features, labels, mode, params):
   """Character level recurrent neural network model to predict classes."""
+  batch_size = params['batch_size']
+  
   byte_vectors = tf.one_hot(features[CHARS_FEATURE], 256, 1., 0.)
   byte_list = tf.unstack(byte_vectors, axis=1)
 
@@ -186,14 +188,26 @@ def char_rnn_model(features, labels, mode, params):
     train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
     return tpu_estimator.TPUEstimatorSpec(mode, loss=loss, train_op=train_op)
 
-  eval_metric_ops = {
-      'accuracy': tf.metrics.accuracy(
+  #trick to report Learning rate as a metric: repeat batch_size time
+  lr_repeat = tf.reshape(
+      tf.tile(tf.expand_dims(learning_rate, 0), [
+          batch_size,
+      ]), [batch_size, 1])
+      
+  eval_metrics = None
+  if mode == tf.estimator.ModeKeys.EVAL:
+    def metric_fn(labels, predicted_classes, learning_rate):
+      """Evaluation metric fn. Performed on CPU, do not reference TPU ops."""      
+      return {
+          'accuracy': tf.metrics.accuracy(
           labels=labels, predictions=predicted_classes),
-      'learning_rate': learning_rate,         
-  }
-  return tpu_estimator.TPUEstimatorSpec(
-      mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
+          'learning_rate': tf.metrics.mean(lr_repeat)
+          }
 
+    eval_metrics = (metric_fn, [labels, predicted_classes, lr_repeat])
+    
+  return tpu_estimator.TPUEstimatorSpec(
+      mode=mode, loss=loss, eval_metrics=eval_metrics)
 
 def main(unused_argv):
   tpu_grpc_url = None
