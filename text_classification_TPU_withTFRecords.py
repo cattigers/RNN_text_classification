@@ -8,6 +8,7 @@ import sys
 import numpy as np
 import pandas
 import tensorflow as tf
+import os
 
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
@@ -54,6 +55,11 @@ flags.DEFINE_string(
     'model_dir', default=None,
     help=('The directory where the model and training/evaluation summaries are'
           ' stored.'))
+
+tf.flags.DEFINE_string(
+    'data_dir', default='.',
+    help='The directory where the ImageNet input data is stored.')
+
 
 flags.DEFINE_bool(
     'skip_host_call', default=False,
@@ -110,7 +116,26 @@ tf.flags.DEFINE_float(
 flags.DEFINE_integer(
     'rnn_size', default=512,
     help=('Number of hidden units in RNN'))
+    
+# For training data infeed parallelism.
+flags.DEFINE_integer(
+    'num_files_infeed',
+    default=8,
+    help='The number of training files to read in parallel.')
 
+flags.DEFINE_integer(
+    'num_parallel_calls',
+    default=8,
+    help='Number of threads to use for transforming images.')
+
+flags.DEFINE_integer(
+    'prefetch_buffer_size',
+    default=100 * 1000 * 1000,
+    help='Prefetch buffer for each file, in bytes.')    
+
+flags.DEFINE_integer('shuffle_buffer_size', 1000,
+                        'Size of the shuffle buffer used to randomize ordering')
+                        
 _NUM_TRAIN_IMAGES = 560000
 
 MAX_DOCUMENT_LENGTH = 200
@@ -147,14 +172,73 @@ def learning_rate_schedule(current_epoch):
                           decay_rate, scaled_lr * mult)
   return decay_rate
   
+class DBPediaInput(object):
+  """Wrapper class that acts as the input_fn to TPUEstimator."""
+
+  def __init__(self, is_training, data_dir=None):
+    self.is_training = is_training
+    self.data_dir = data_dir if data_dir else FLAGS.data_dir
+
+  def dataset_parser(self, value):
+    """Parse an Imagenet record from value."""
+    keys_to_features = {
+        'X': tf.FixedLenSequenceFeature([MAX_DOCUMENT_LENGTH], tf.int64, -1),
+        'Y': tf.FixedLenFeature([], tf.int64, -1)            
+    }
+    parsed = tf.parse_single_example(value, keys_to_features)
+    return tf.squeeze(parsed['X']), parsed['Y']
+
+  def __call__(self, params):
+    """Input function which provides a single batch for train or eval."""
+    # Retrieves the batch size for the current shard. The # of shards is
+    # computed according to the input pipeline deployment. See
+    # `tf.contrib.tpu.RunConfig` for details.
+    batch_size = params['batch_size']
+
+    # Shuffle the filenames to ensure better randomization
+    file_pattern = os.path.join(
+        self.data_dir, 'train*' if self.is_training else 'test*')
+    dataset = tf.data.Dataset.list_files(file_pattern)
+    if self.is_training:
+      dataset = dataset.shuffle(buffer_size=1024)  # 1024 files in dataset
+
+    if self.is_training:
+      dataset = dataset.repeat()
+
+    def prefetch_dataset(filename):
+      buffer_size =  FLAGS.prefetch_buffer_size
+      dataset = tf.data.TFRecordDataset(filename, buffer_size=buffer_size)
+      return dataset
+
+    dataset = dataset.apply(
+        tf.contrib.data.parallel_interleave(
+            prefetch_dataset, cycle_length= FLAGS.num_files_infeed,
+            sloppy=True))
+    dataset = dataset.shuffle(FLAGS.shuffle_buffer_size)
+
+    dataset = dataset.map(
+        self.dataset_parser,
+        num_parallel_calls=FLAGS.num_parallel_calls)
+    dataset = dataset.prefetch(batch_size)
+    dataset = dataset.apply(
+        tf.contrib.data.batch_and_drop_remainder(batch_size))
+
+    dataset = dataset.prefetch(2)  # Prefetch overlaps in-feed with training
+    images, labels = dataset.make_one_shot_iterator().get_next()
+    return images, labels
+
   
 def char_rnn_model(features, labels, mode, params):
   """Character level recurrent neural network model to predict classes."""
   batch_size = params['batch_size']
   
-  byte_vectors = tf.one_hot(features[CHARS_FEATURE], 256, 1., 0.)
-  byte_list = tf.unstack(byte_vectors, axis=1)
-
+  byte_vectors = tf.squeeze(tf.one_hot(features, 256, 1., 0.))
+  byte_vectors = tf.one_hot(features, 256, 1., 0.)
+  
+  byte_list = tf.unstack(byte_vectors, num=MAX_DOCUMENT_LENGTH, axis=1)
+  for item in byte_list:
+      item.set_shape((params['batch_size'], 256))
+  
   cell = tf.nn.rnn_cell.GRUCell(HIDDEN_SIZE)
   _, encoding = tf.nn.static_rnn(cell, byte_list, dtype=tf.float32)
 
@@ -252,34 +336,8 @@ def main(unused_argv):
       tpu_config=tpu_config.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_cores))
-    
-  # Prepare training and testing data
-  dbpedia = tf.contrib.learn.datasets.load_dataset(
-      'dbpedia', size='large', test_with_fake_data=FLAGS.test_with_fake_data)
+  batches_per_epoch = _NUM_TRAIN_IMAGES / FLAGS.train_batch_size
   
-  print("Shuffling data set...")
-  x_train = dbpedia.train.data[:, 1]
-  y_train = dbpedia.train.target
-  s = np.arange(len(y_train))
-  np.random.shuffle(s)
-  x_train = x_train[s]
-  y_train = y_train[s]
-  print("Done!")  
-  
-  x_train = pandas.Series(x_train)
-  y_train = pandas.Series(y_train)
-  x_test = pandas.Series(dbpedia.test.data[:, 1])
-  y_test = pandas.Series(dbpedia.test.target)
-
-  print('Train data size:', x_train.shape)
-  print('Test data size:', x_test.shape)
-
-  # Process vocabulary
-  char_processor = tf.contrib.learn.preprocessing.ByteProcessor(
-      MAX_DOCUMENT_LENGTH)
-  x_train = np.array(list(char_processor.fit_transform(x_train)), dtype=np.int32)
-  x_test = np.array(list(char_processor.transform(x_test)), dtype=np.int32)
-
   # Build model
   #classifier = tf.estimator.Estimator(model_fn=char_rnn_model)
   classifier = tpu_estimator.TPUEstimator(
@@ -287,23 +345,8 @@ def main(unused_argv):
       model_fn=char_rnn_model,
       config=config,
       train_batch_size=FLAGS.train_batch_size,
-      eval_batch_size=FLAGS.eval_batch_size)    
-
-  def TPU_train_input_fn(params):
-      return tf.estimator.inputs.numpy_input_fn(
-          x={CHARS_FEATURE: x_train},
-          y=y_train,
-          batch_size=params['batch_size'],
-          num_epochs=None,
-          shuffle=True)()
-
-  def TPU_test_input_fn(params):
-      return tf.estimator.inputs.numpy_input_fn(
-          x={CHARS_FEATURE: x_test},
-          y=y_test,
-          batch_size=params['batch_size'],
-          num_epochs=1,
-          shuffle=False)()
+      eval_batch_size=FLAGS.eval_batch_size,
+      params={'batches_per_epoch': batches_per_epoch})
 
   # Train.
   current_step = 0
@@ -314,16 +357,16 @@ def main(unused_argv):
                       FLAGS.train_steps)  
 
     classifier.train(
-        input_fn=TPU_train_input_fn, max_steps=next_checkpoint)
+        input_fn=DBPediaInput(True), max_steps=next_checkpoint)
     current_step = next_checkpoint
     
     # Eval.
     tf.logging.info('Starting to evaluate.')
     eval_results = classifier.evaluate(
-        input_fn=TPU_test_input_fn)
+        input_fn=DBPediaInput(False))
     tf.logging.info('Test eval results: %s' % eval_results)
     
-  scores = classifier.evaluate(input_fn=TPU_test_input_fn)
+  scores = classifier.evaluate(input_fn=DBPediaInput(False))
   print('Accuracy: {0:f}'.format(scores['accuracy']))
 
 
@@ -332,7 +375,5 @@ if __name__ == '__main__':
   tf.app.run()
 
   #run CMD: 
-  #python text_classification_TPU.py --use_tpu=False --model_dir=./char_results #converge to 97.57% accuracy
-  #python text_classification_TPU.py --use_tpu=False --model_dir=./char_results_512 --rnn_size=512 --train_batch_size=1024 --learning_rate=0.05
-  #python text_classification_TPU.py --use_tpu=False --model_dir=./char_results_1024 --rnn_size=1024 --train_batch_size=512 --learning_rate=0.05
+  #python text_classification_TPU_withTFRecords.py --use_tpu=False --model_dir=./char_results_TFRecords --train_batch_size=128  #converge to 97.57% accuracy 
   #export CUDA_VISIBLE_DEVICES=2
