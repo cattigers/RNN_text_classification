@@ -9,6 +9,13 @@ import numpy as np
 import pandas
 import tensorflow as tf
 import pdb
+        
+FLAGS = None
+MAX_DOCUMENT_LENGTH = None
+n_words = None
+MAX_LABEL = 15
+WORDS_FEATURE = 'words'  # Name of the input words feature.
+
 
 def np_to_tfrecords(X, Y, file_path_prefix, verbose=True):
     def _int64_feature(value):
@@ -33,15 +40,11 @@ def np_to_tfrecords(X, Y, file_path_prefix, verbose=True):
     
     if verbose:
         print ("Writing {} done!".format(result_tf_file))
-        
-
-MAX_DOCUMENT_LENGTH = 50
-n_words = None
-MAX_LABEL = 15
-WORDS_FEATURE = 'words'  # Name of the input words feature.
 
 def main():
     global n_words
+    global MAX_DOCUMENT_LENGTH
+    
     tf.logging.set_verbosity(tf.logging.INFO)
     
     # Prepare training and testing data
@@ -81,8 +84,8 @@ def main():
     y_train = np.expand_dims(np.asarray(y_train), axis=1) 
     y_test = np.expand_dims(np.asarray(y_test), axis=1) 
       
-    np_to_tfrecords(x_train_fit, np.asarray(y_train, np.int), 'word-train', verbose=True)
-    np_to_tfrecords(x_test_fit, np.asarray(y_test, np.int), 'word-test', verbose=True)
+    np_to_tfrecords(x_train_fit, np.asarray(y_train, np.int), 'word-train-%d'%MAX_DOCUMENT_LENGTH, verbose=True)
+    np_to_tfrecords(x_test_fit, np.asarray(y_test, np.int), 'word-test-%d'%MAX_DOCUMENT_LENGTH, verbose=True)
     
     total_err = 0
     err = 0
@@ -108,4 +111,13 @@ def main():
     print('Test set Error: %f'% err)
     
 if __name__ == '__main__':
-    main()    
+  parser = argparse.ArgumentParser()
+  parser.add_argument(
+      '--max_document_length',
+      default=50,
+      help='Max document length.',
+      action='store_true')
+      
+  FLAGS, unparsed = parser.parse_known_args()
+  MAX_DOCUMENT_LENGTH = FLAGS.max_document_length
+  main()    

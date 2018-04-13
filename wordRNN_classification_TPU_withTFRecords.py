@@ -280,11 +280,6 @@ def word_rnn_model(features, labels, mode, params):
   current_epoch = (tf.cast(global_step, tf.float32)/batches_per_epoch)
   learning_rate = learning_rate_schedule(current_epoch)
   
-  if mode == tf.estimator.ModeKeys.TRAIN:
-    optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-    train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
-    return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
-
   predicted_classes = tf.argmax(logits, 1)
   if mode == tf.estimator.ModeKeys.PREDICT:
     return tpu_estimator.TPUEstimatorSpec(

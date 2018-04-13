@@ -10,6 +10,8 @@ import pandas
 import tensorflow as tf
 import pdb
 
+MAX_DOCUMENT_LENGTH=None
+
 def np_to_tfrecords(X, Y, file_path_prefix, verbose=True):
     def _int64_feature(value):
         return tf.train.Feature(int64_list=tf.train.Int64List(value=value.reshape(-1)))
@@ -33,13 +35,12 @@ def np_to_tfrecords(X, Y, file_path_prefix, verbose=True):
     
     if verbose:
         print ("Writing {} done!".format(result_tf_file))
-        
 
-MAX_DOCUMENT_LENGTH=200
-
-def main():
+def main():    
     # Prepare training and testing data
-    # Prepare training and testing data
+    global n_words
+    global MAX_DOCUMENT_LENGTH
+    
     print('MAX_DOCUMENT_LENGTH', MAX_DOCUMENT_LENGTH)
     dbpedia = tf.contrib.learn.datasets.load_dataset(
       'dbpedia', size='large', test_with_fake_data=False)
@@ -70,8 +71,8 @@ def main():
     y_train = np.expand_dims(np.asarray(y_train), axis=1) 
     y_test = np.expand_dims(np.asarray(y_test), axis=1) 
   
-    np_to_tfrecords(x_train_fit, np.asarray(y_train, np.int), 'train', verbose=True)
-    np_to_tfrecords(x_test_fit, np.asarray(y_test, np.int), 'test', verbose=True)
+    np_to_tfrecords(x_train_fit, np.asarray(y_train, np.int), 'char-train-%d'%MAX_DOCUMENT_LENGTH, verbose=True)
+    np_to_tfrecords(x_test_fit, np.asarray(y_test, np.int), 'char-test-%d'%MAX_DOCUMENT_LENGTH, verbose=True)
     
     total_err = 0
     err = 0
@@ -97,4 +98,13 @@ def main():
     print('Test set Error: %f'% err)
     
 if __name__ == '__main__':
-    main()    
+  parser = argparse.ArgumentParser()
+  parser.add_argument(
+      '--max_document_length',
+      default=200,
+      help='Max document length.',
+      action='store_true')
+      
+  FLAGS, unparsed = parser.parse_known_args()
+  MAX_DOCUMENT_LENGTH = FLAGS.max_document_length
+  main()       
