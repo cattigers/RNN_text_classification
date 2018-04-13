@@ -137,7 +137,7 @@ flags.DEFINE_integer('shuffle_buffer_size', 1000,
                         'Size of the shuffle buffer used to randomize ordering')
 
 flags.DEFINE_integer(
-    'max_document_length', default=200,
+    'max_document_length', default=50,
     help=('The number of steps to use for training. Default is 54687 steps'
           ' which is approximately 100 epochs at batch size 1024. This flag'
           ' should be adjusted according to the --train_batch_size flag.'))
@@ -145,15 +145,15 @@ flags.DEFINE_integer(
 _NUM_TRAIN_IMAGES = 560000
 _NUM_EVAL_IMAGES = 70000
 
-MAX_DOCUMENT_LENGTH = 100
+MAX_DOCUMENT_LENGTH = 50    
 EMBEDDING_SIZE = 64
-n_words = None
+n_words = 743040 #Number of words in the full DBPedia data set
 MAX_LABEL = 15
 WORDS_FEATURE = 'words'  # Name of the input words feature.
 
 # Learning hyperaparmeters
 _MOMENTUM = 0.9
-_WEIGHT_DECAY = 1e-4
+_WEIGHT_DECAY = 1e-6
 _LR_SCHEDULE = [  # (LR multiplier, epoch to start)
     (1.0, 5), (0.1, 15), (0.01, 25), (0.001, 30), 
 ]
@@ -193,6 +193,7 @@ class DBPediaInput(object):
         'X': tf.FixedLenFeature(shape=[MAX_DOCUMENT_LENGTH], dtype=tf.int64),
         'Y': tf.FixedLenFeature(shape=[1], dtype=tf.int64)            
     }
+  
     parsed = tf.parse_single_example(value, keys_to_features)
     X = tf.cast(parsed['X'], tf.int32)
     Y = tf.cast(parsed['Y'], tf.int32)
@@ -207,7 +208,8 @@ class DBPediaInput(object):
 
     # Shuffle the filenames to ensure better randomization
     file_pattern = os.path.join(
-        self.data_dir, 'train*' if self.is_training else 'test*')
+        self.data_dir, 'word-train.tfrecords' if self.is_training else 'word-test.tfrecords')
+        #self.data_dir, 'train*' if self.is_training else 'test*')
     dataset = tf.data.Dataset.list_files(file_pattern)
     if self.is_training:
       dataset = dataset.shuffle(buffer_size=1024)  # 1024 files in dataset
@@ -238,33 +240,35 @@ class DBPediaInput(object):
     return images, labels
 
   
-def char_rnn_model(features, labels, mode, params):
-  """Character level recurrent neural network model to predict classes."""
+def word_rnn_model(features, labels, mode, params):  
   batch_size = params['batch_size']
   
-  #byte_vectors = tf.squeeze(tf.one_hot(features, 256, 1., 0.))
-  #byte_list = tf.unstack(byte_vectors, num=MAX_DOCUMENT_LENGTH, axis=1)
-  #for item in byte_list:
-  #    item.set_shape((params['batch_size'], 256))
+  """RNN model to predict from sequence of words to a class."""
+  # Convert indexes of words into embeddings.
+  # This creates embeddings matrix of [n_words, EMBEDDING_SIZE] and then
+  # maps word indexes of the sequence into [batch_size, sequence_length,
+  # EMBEDDING_SIZE].
+  word_vectors = tf.contrib.layers.embed_sequence(
+      features, vocab_size=n_words, embed_dim=EMBEDDING_SIZE)
 
-  byte_vectors = tf.one_hot(features, 256, 1., 0.)
-  byte_list = tf.unstack(byte_vectors, axis=1)
-  
-  
-  cell = tf.nn.rnn_cell.GRUCell(HIDDEN_SIZE)
-  _, encoding = tf.nn.static_rnn(cell, byte_list, dtype=tf.float32)
+  # Split into list of embedding per word, while removing doc length dim.
+  # word_list results to be a list of tensors [batch_size, EMBEDDING_SIZE].
+  word_list = tf.unstack(word_vectors, axis=1)
 
+  # Create a Gated Recurrent Unit cell with hidden size of EMBEDDING_SIZE.
+  #cell = tf.nn.rnn_cell.GRUCell(EMBEDDING_SIZE)
+  #cell = tf.nn.rnn_cell.LSTMCell(EMBEDDING_SIZE)
+  cell = tf.nn.rnn_cell.BasicLSTMCell(EMBEDDING_SIZE, state_is_tuple=False)
+
+  # Create an unrolled Recurrent Neural Networks to length of
+  # MAX_DOCUMENT_LENGTH and passes word_list as inputs for each unit.
+  _, encoding = tf.nn.static_rnn(cell, word_list, dtype=tf.float32)
+
+  # Given encoding of RNN, take encoding of last step (e.g hidden size of the
+  # neural network of last step) and pass it as features for softmax
+  # classification over output classes.
   logits = tf.layers.dense(encoding, MAX_LABEL, activation=None)
-
-  predicted_classes = tf.argmax(logits, 1)
-  if mode == tf.estimator.ModeKeys.PREDICT:
-    return tpu_estimator.TPUEstimatorSpec(
-        mode=mode,
-        predictions={
-            'class': predicted_classes,
-            'prob': tf.nn.softmax(logits)
-        })
-
+  
   #loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
   loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits) +\
           _WEIGHT_DECAY * tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables()
@@ -275,6 +279,20 @@ def char_rnn_model(features, labels, mode, params):
   global_step = tf.train.get_global_step()
   current_epoch = (tf.cast(global_step, tf.float32)/batches_per_epoch)
   learning_rate = learning_rate_schedule(current_epoch)
+  
+  if mode == tf.estimator.ModeKeys.TRAIN:
+    optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+    train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
+    return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
+
+  predicted_classes = tf.argmax(logits, 1)
+  if mode == tf.estimator.ModeKeys.PREDICT:
+    return tpu_estimator.TPUEstimatorSpec(
+        mode=mode,
+        predictions={
+            'class': predicted_classes,
+            'prob': tf.nn.softmax(logits)
+        })
   
   if mode == tf.estimator.ModeKeys.TRAIN:
     #optimizer = tf.train.AdamOptimizer(learning_rate=0.01)
@@ -312,19 +330,45 @@ def char_rnn_model(features, labels, mode, params):
           }
 
     eval_metrics = (metric_fn, [labels, logits, lr_repeat, ce_repeat])
-    #eval_metrics= (lambda x,y: {'dummy':tf.metrics.accuracy(x,y)},[labels,predicted_classes])
-    #eval_metrics=(lambda x:{'accuracy': tf.metrics.mean(x)},[labels])
-    
+
   return tpu_estimator.TPUEstimatorSpec(
       mode=mode, loss=loss, eval_metrics=eval_metrics)
 
 
 import pdb  
 def main(unused_argv):
+  global n_words
+  tf.logging.set_verbosity(tf.logging.INFO)
   global HIDDEN_SIZE
   global MAX_DOCUMENT_LENGTH
   HIDDEN_SIZE = FLAGS.rnn_size
   MAX_DOCUMENT_LENGTH = FLAGS.max_document_length
+
+  # Get vocab size if not provided
+  if n_words is None:
+      dbpedia = tf.contrib.learn.datasets.load_dataset(
+          'dbpedia', size='large', test_with_fake_data=FLAGS.test_with_fake_data)
+      print("Shuffling data set...")
+      x_train = dbpedia.train.data[:, 1]
+      y_train = dbpedia.train.target
+      s = np.arange(len(y_train))
+      np.random.shuffle(s)
+      x_train = x_train[s]
+      y_train = y_train[s]
+      print("Done!")  
+      
+      x_train = pandas.Series(x_train)
+      y_train = pandas.Series(y_train)
+      x_test = pandas.Series(dbpedia.test.data[:, 1])
+      y_test = pandas.Series(dbpedia.test.target)
+      # Process vocabulary
+      vocab_processor = tf.contrib.learn.preprocessing.VocabularyProcessor(
+          MAX_DOCUMENT_LENGTH)
+    
+      x_transform_train = vocab_processor.fit_transform(x_train)  
+      n_words = len(vocab_processor.vocabulary_)
+      print('Total words: %d' % n_words)
+
   
   tpu_grpc_url = None
   tpu_cluster_resolver = None
@@ -362,7 +406,7 @@ def main(unused_argv):
   #classifier = tf.estimator.Estimator(model_fn=char_rnn_model)
   classifier = tpu_estimator.TPUEstimator(
       use_tpu=FLAGS.use_tpu,
-      model_fn=char_rnn_model,
+      model_fn=word_rnn_model,
       config=config,
       train_batch_size=FLAGS.train_batch_size,
       eval_batch_size=FLAGS.eval_batch_size,
@@ -407,6 +451,6 @@ if __name__ == '__main__':
   tf.app.run()
 
   #run CMD: 
-  #python text_classification_TPU_withTFRecords.py --use_tpu=False --model_dir=./char_results_TFRecords --train_batch_size=128  #converge to 97.57% accuracy 
+  #python wordRNN_classification_TPU_withTFRecords.py --use_tpu=False --model_dir=./word_results_TFRecords --train_batch_size=1024  #converge to 97.57% accuracy 
   #export CUDA_VISIBLE_DEVICES=2
-  #python text_classification_TPU_withTFRecords.py \--use_tpu=False --model_dir=./char_results_TFRecords --train_batch_size=128
+  
