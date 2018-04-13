@@ -114,7 +114,7 @@ tf.flags.DEFINE_float(
           'For other batch sizes it is scaled linearly with batch size.'))
 
 flags.DEFINE_integer(
-    'rnn_size', default=512,
+    'rnn_size', default=256,
     help=('Number of hidden units in RNN'))
     
 # For training data infeed parallelism.
@@ -135,6 +135,12 @@ flags.DEFINE_integer(
 
 flags.DEFINE_integer('shuffle_buffer_size', 1000,
                         'Size of the shuffle buffer used to randomize ordering')
+
+flags.DEFINE_integer(
+    'max_document_length', default=200,
+    help=('The number of steps to use for training. Default is 54687 steps'
+          ' which is approximately 100 epochs at batch size 1024. This flag'
+          ' should be adjusted according to the --train_batch_size flag.'))
                         
 _NUM_TRAIN_IMAGES = 560000
 _NUM_EVAL_IMAGES = 70000
@@ -146,7 +152,7 @@ CHARS_FEATURE = 'chars'  # Name of the input character feature.
 
 # Learning hyperaparmeters
 _MOMENTUM = 0.9
-_WEIGHT_DECAY = 1e-4
+_WEIGHT_DECAY = 1e-6
 _LR_SCHEDULE = [  # (LR multiplier, epoch to start)
     (1.0, 5), (0.1, 15), (0.01, 25), (0.001, 30), 
 ]
@@ -315,7 +321,9 @@ def char_rnn_model(features, labels, mode, params):
 import pdb  
 def main(unused_argv):
   global HIDDEN_SIZE
+  global MAX_DOCUMENT_LENGTH
   HIDDEN_SIZE = FLAGS.rnn_size
+  MAX_DOCUMENT_LENGTH = FLAGS.max_document_length
   
   tpu_grpc_url = None
   tpu_cluster_resolver = None
@@ -400,3 +408,4 @@ if __name__ == '__main__':
   #run CMD: 
   #python text_classification_TPU_withTFRecords.py --use_tpu=False --model_dir=./char_results_TFRecords --train_batch_size=128  #converge to 97.57% accuracy 
   #export CUDA_VISIBLE_DEVICES=2
+  #python text_classification_TPU_withTFRecords.py \--use_tpu=False --model_dir=./char_results_TFRecords --train_batch_size=128

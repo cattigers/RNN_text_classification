@@ -87,8 +87,6 @@ def main():
             #break
     print('Train set Error: %f'% total_err)
     
-
-    
     err = 0
     for i, serialized_example in enumerate(tf.python_io.tf_record_iterator('test.tfrecords')):
         example = tf.train.Example()
