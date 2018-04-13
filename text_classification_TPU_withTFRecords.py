@@ -137,6 +137,7 @@ flags.DEFINE_integer('shuffle_buffer_size', 1000,
                         'Size of the shuffle buffer used to randomize ordering')
                         
 _NUM_TRAIN_IMAGES = 560000
+_NUM_EVAL_IMAGES = 70000
 
 MAX_DOCUMENT_LENGTH = 200
 HIDDEN_SIZE = 256
@@ -186,8 +187,8 @@ class DBPediaInput(object):
         'Y': tf.FixedLenFeature(shape=[1], dtype=tf.int64)            
     }
     parsed = tf.parse_single_example(value, keys_to_features)
-    X = parsed['X']
-    Y = parsed['Y']
+    X = tf.cast(parsed['X'], tf.int32)
+    Y = tf.cast(parsed['Y'], tf.int32)
     return X, Y
 
   def __call__(self, params):
@@ -292,8 +293,10 @@ def char_rnn_model(features, labels, mode, params):
       ]), [batch_size, 1])      
   eval_metrics = None
   if mode == tf.estimator.ModeKeys.EVAL:
-    def metric_fn(labels, predicted_classes, lr_repeat, ce_repeat):
+    def metric_fn(labels, logits, lr_repeat, ce_repeat):
       """Evaluation metric fn. Performed on CPU, do not reference TPU ops."""      
+      
+      predicted_classes = tf.argmax(logits, 1)
       return {
           'accuracy': tf.metrics.accuracy(
                                   labels=labels, predictions=predicted_classes),
@@ -301,11 +304,15 @@ def char_rnn_model(features, labels, mode, params):
           'current_epoch': tf.metrics.mean(ce_repeat)
           }
 
-    eval_metrics = (metric_fn, [labels, predicted_classes, lr_repeat, ce_repeat])
+    eval_metrics = (metric_fn, [labels, logits, lr_repeat, ce_repeat])
+    #eval_metrics= (lambda x,y: {'dummy':tf.metrics.accuracy(x,y)},[labels,predicted_classes])
+    #eval_metrics=(lambda x:{'accuracy': tf.metrics.mean(x)},[labels])
     
   return tpu_estimator.TPUEstimatorSpec(
       mode=mode, loss=loss, eval_metrics=eval_metrics)
 
+
+import pdb  
 def main(unused_argv):
   global HIDDEN_SIZE
   HIDDEN_SIZE = FLAGS.rnn_size
@@ -341,7 +348,7 @@ def main(unused_argv):
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_cores))
   batches_per_epoch = _NUM_TRAIN_IMAGES / FLAGS.train_batch_size
-  
+  #pdb.set_trace()
   # Build model
   #classifier = tf.estimator.Estimator(model_fn=char_rnn_model)
   classifier = tpu_estimator.TPUEstimator(
@@ -352,12 +359,19 @@ def main(unused_argv):
       eval_batch_size=FLAGS.eval_batch_size,
       params={'batches_per_epoch': batches_per_epoch})
 
+  current_step = 0
   # Train.
   current_step = estimator._load_global_step_from_checkpoint_dir(FLAGS.model_dir)  # pylint: disable=protected-access,line-too-long
   tf.logging.info('Training for %d steps (%.2f epochs in total). Current '
                     'step %d' % (FLAGS.train_steps,
                                  FLAGS.train_steps / batches_per_epoch,
                                  current_step))
+
+  if current_step > 0:                  
+      scores = classifier.evaluate(input_fn=DBPediaInput(True), steps=10)
+      print('Accuracy: {0:f}'.format(scores['accuracy']))
+
+
   while current_step < FLAGS.train_steps:
     # Train for up to steps_per_eval number of steps.
     # At the end of training, a checkpoint will be written to --model_dir.
@@ -371,10 +385,11 @@ def main(unused_argv):
     # Eval.
     tf.logging.info('Starting to evaluate.')
     eval_results = classifier.evaluate(
-        input_fn=DBPediaInput(False))
+        input_fn=DBPediaInput(False), 
+        steps=10)
     tf.logging.info('Test eval results: %s' % eval_results)
     
-  scores = classifier.evaluate(input_fn=DBPediaInput(False))
+  scores = classifier.evaluate(input_fn=DBPediaInput(False), steps=70)
   print('Accuracy: {0:f}'.format(scores['accuracy']))
 
 

@@ -42,7 +42,7 @@ def main():
     # Prepare training and testing data
     print('MAX_DOCUMENT_LENGTH', MAX_DOCUMENT_LENGTH)
     dbpedia = tf.contrib.learn.datasets.load_dataset(
-      'dbpedia', size='small', test_with_fake_data=False)
+      'dbpedia', size='large', test_with_fake_data=False)
     
     print("Shuffling data set...")
     x_train = dbpedia.train.data[:, 1]
