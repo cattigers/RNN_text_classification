@@ -76,7 +76,7 @@ def main():
     
     total_err = 0
     err = 0
-    for i, serialized_example in enumerate(tf.python_io.tf_record_iterator('train.tfrecords')):
+    for i, serialized_example in enumerate(tf.python_io.tf_record_iterator('char-train-%d.tfrecords'%MAX_DOCUMENT_LENGTH)):
         example = tf.train.Example()
         example.ParseFromString(serialized_example)
         x_1 = np.array(example.features.feature['X'].int64_list.value)
@@ -89,7 +89,7 @@ def main():
     print('Train set Error: %f'% total_err)
     
     err = 0
-    for i, serialized_example in enumerate(tf.python_io.tf_record_iterator('test.tfrecords')):
+    for i, serialized_example in enumerate(tf.python_io.tf_record_iterator('char-test-%d.tfrecords'%MAX_DOCUMENT_LENGTH)):
         example = tf.train.Example()
         example.ParseFromString(serialized_example)
         x_1 = np.array(example.features.feature['X'].int64_list.value)
@@ -97,14 +97,19 @@ def main():
         err += np.linalg.norm(x_test_fit[i]-x_1) + np.linalg.norm(y_test[i]-y_1)    
     print('Test set Error: %f'% err)
     
+import pdb    
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument(
       '--max_document_length',
       default=200,
       help='Max document length.',
-      action='store_true')
+      type=int,
+      )
       
   FLAGS, unparsed = parser.parse_known_args()
   MAX_DOCUMENT_LENGTH = FLAGS.max_document_length
+  print('MAX_DOCUMENT_LENGTH = ', MAX_DOCUMENT_LENGTH)
+  #pdb.set_trace()  
+  
   main()       

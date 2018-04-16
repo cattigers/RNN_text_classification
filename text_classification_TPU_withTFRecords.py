@@ -206,7 +206,8 @@ class DBPediaInput(object):
 
     # Shuffle the filenames to ensure better randomization
     file_pattern = os.path.join(
-        self.data_dir, 'train*' if self.is_training else 'test*')
+        self.data_dir, 'char-train-%d*'%MAX_DOCUMENT_LENGTH if self.is_training 
+        else 'char-test-%d*'%MAX_DOCUMENT_LENGTH )
     dataset = tf.data.Dataset.list_files(file_pattern)
     if self.is_training:
       dataset = dataset.shuffle(buffer_size=1024)  # 1024 files in dataset
@@ -322,6 +323,7 @@ import pdb
 def main(unused_argv):
   global HIDDEN_SIZE
   global MAX_DOCUMENT_LENGTH
+  
   HIDDEN_SIZE = FLAGS.rnn_size
   MAX_DOCUMENT_LENGTH = FLAGS.max_document_length
   

@@ -116,6 +116,7 @@ if __name__ == '__main__':
       '--max_document_length',
       default=50,
       help='Max document length.',
+      type=int,
       action='store_true')
       
   FLAGS, unparsed = parser.parse_known_args()
